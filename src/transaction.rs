@@ -15,7 +15,7 @@ use log::{error, trace};
 use zeroize::Zeroizing;
 
 #[cfg(feature = "untested")]
-use crate::mgm::{DeviceConfig, DeviceInfo, Lock, MgmKey, DES_LEN_3DES};
+use crate::mgm::{DeviceConfig, DeviceInfo, Lock, MgmKey};
 
 const CB_PIN_MAX: usize = 8;
 
@@ -251,12 +251,13 @@ impl<'tx> Transaction<'tx> {
     #[cfg(feature = "untested")]
     pub fn set_mgm_key(&self, new_key: &MgmKey, require_touch: bool) -> Result<()> {
         let p2 = if require_touch { 0xfe } else { 0xff };
-
-        let mut data = [0u8; DES_LEN_3DES + 3];
-        data[0] = ALGO_3DES;
+        let alg = new_key.algo();
+        let key_len = alg.key_len();
+        let mut data = vec![0u8; 3 + key_len];
+        data[0] = alg as u8;
         data[1] = KEY_CARDMGM;
-        data[2] = DES_LEN_3DES as u8;
-        data[3..3 + DES_LEN_3DES].copy_from_slice(new_key.as_ref());
+        data[2] = alg.key_len() as u8;
+        data[3..3 + alg.key_len()].copy_from_slice(new_key.as_ref());
 
         let status_words = Apdu::new(Ins::SetMgmKey)
             .params(0xff, p2)

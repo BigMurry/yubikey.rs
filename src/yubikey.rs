@@ -56,7 +56,7 @@ use {
         apdu::StatusWords,
         consts::{TAG_ADMIN_FLAGS_1, TAG_ADMIN_TIMESTAMP},
         metadata::AdminData,
-        mgm,
+        mgm::{self, MgmAlgorithmId},
         transaction::ChangeRefAction,
         Buffer, ObjectId,
     },
@@ -66,9 +66,6 @@ use {
 
 /// Flag for PUK blocked
 pub(crate) const ADMIN_FLAGS_1_PUK_BLOCKED: u8 = 0x01;
-
-/// 3DES authentication
-pub(crate) const ALGO_3DES: u8 = 0x03;
 
 /// Card management key
 pub(crate) const KEY_CARDMGM: u8 = 0x9b;
@@ -412,35 +409,37 @@ impl YubiKey {
     /// Authenticate to the card using the provided management key (MGM).
     pub fn authenticate(&mut self, mgm_key: MgmKey) -> Result<()> {
         let txn = self.begin_transaction()?;
-
+        let alg = mgm_key.algo();
         // get a challenge from the card
         let challenge = Apdu::new(Ins::Authenticate)
-            .params(ALGO_3DES, KEY_CARDMGM)
+            .params(alg as u8, KEY_CARDMGM)
             .data([TAG_DYN_AUTH, 0x02, 0x80, 0x00])
             .transmit(&txn, 261)?;
 
-        if !challenge.is_success() || challenge.data().len() < 12 {
+        let challenge_len = alg.challenge_len();
+
+        if !challenge.is_success() || challenge.data().len() < challenge_len {
             return Err(Error::AuthenticationError);
         }
 
         // send a response to the cards challenge and a challenge of our own.
-        let response = mgm_key.decrypt(challenge.data()[4..12].try_into()?);
+        let response = mgm_key.decrypt(&challenge.data()[4..challenge_len + 4])?;
 
-        let mut data = [0u8; 22];
+        let mut data = vec![0u8; 6 + challenge_len * 2];
         data[0] = TAG_DYN_AUTH;
-        data[1] = 20; // 2 + 8 + 2 +8
-        data[2] = 0x80;
-        data[3] = 8;
-        data[4..12].copy_from_slice(&response);
-        data[12] = 0x81;
-        data[13] = 8;
-        OsRng.fill_bytes(&mut data[14..22]);
+        data[1] = 4 + challenge_len as u8 * 2;
+        data[2] = 0x80; // TAG_AUTH_WITNESS
+        data[3] = challenge_len as u8;
+        data[4..4 + challenge_len].copy_from_slice(&response);
+        data[4 + challenge_len] = 0x81; // TAG_AUTH_CHALLENGE
+        data[5 + challenge_len] = challenge_len as u8;
+        OsRng.fill_bytes(&mut data[6 + challenge_len..6 + challenge_len * 2]);
 
-        let mut challenge = [0u8; 8];
-        challenge.copy_from_slice(&data[14..22]);
+        let mut challenge = vec![0u8; challenge_len];
+        challenge.copy_from_slice(&data[6 + challenge_len..6 + challenge_len * 2]);
 
         let authentication = Apdu::new(Ins::Authenticate)
-            .params(ALGO_3DES, KEY_CARDMGM)
+            .params(alg as u8, KEY_CARDMGM)
             .data(data)
             .transmit(&txn, 261)?;
 
@@ -449,7 +448,7 @@ impl YubiKey {
         }
 
         // compare the response from the card with our challenge
-        let response = mgm_key.encrypt(&challenge);
+        let response = mgm_key.encrypt(&challenge)?;
 
         use subtle::ConstantTimeEq;
         if response.ct_eq(&authentication.data()[4..12]).unwrap_u8() != 1 {
@@ -682,11 +681,12 @@ impl YubiKey {
 
     /// Get an auth challenge.
     #[cfg(feature = "untested")]
-    pub fn get_auth_challenge(&mut self) -> Result<[u8; 8]> {
+    pub fn get_auth_challenge(&mut self) -> Result<Vec<u8>> {
         let txn = self.begin_transaction()?;
+        let alg = MgmAlgorithmId::query(&txn)?;
 
         let response = Apdu::new(Ins::Authenticate)
-            .params(ALGO_3DES, KEY_CARDMGM)
+            .params(alg as u8, KEY_CARDMGM)
             .data([0x7c, 0x02, 0x81, 0x00])
             .transmit(&txn, 261)?;
 
@@ -694,28 +694,43 @@ impl YubiKey {
             return Err(Error::AuthenticationError);
         }
 
-        Ok(response
-            .data()
-            .get(4..12)
-            .ok_or(Error::SizeError)?
-            .try_into()?)
+        let challenge_size = alg.challenge_len();
+        let mut challenge = vec![0u8; challenge_size];
+        challenge.copy_from_slice(
+            response
+                .data()
+                .get(4..4 + challenge_size)
+                .ok_or(Error::SizeError)?,
+        );
+        Ok(challenge)
+        // Ok(response
+        //     .data()
+        //     .get(4..12)
+        //     .ok_or(Error::SizeError)?
+        //     .try_into()?)
     }
 
     /// Verify an auth response.
     #[cfg(feature = "untested")]
-    pub fn verify_auth_response(&mut self, response: [u8; 8]) -> Result<()> {
-        let mut data = [0u8; 12];
+    pub fn verify_auth_response(&mut self, response: &[u8]) -> Result<()> {
+        let txn = self.begin_transaction()?;
+        let alg = MgmAlgorithmId::query(&txn)?;
+        let challenge_size = alg.challenge_len();
+
+        if response.len() != challenge_size {
+            return Err(Error::SizeError);
+        }
+
+        let mut data = vec![0u8; 4 + challenge_size];
         data[0] = 0x7c;
         data[1] = 0x0a;
         data[2] = 0x82;
         data[3] = 0x08;
-        data[4..12].copy_from_slice(&response);
-
-        let txn = self.begin_transaction()?;
+        data[4..4 + challenge_size].copy_from_slice(response);
 
         // send the response to the card and a challenge of our own.
         let status_words = Apdu::new(Ins::Authenticate)
-            .params(ALGO_3DES, KEY_CARDMGM)
+            .params(alg as u8, KEY_CARDMGM)
             .data(data)
             .transmit(&txn, 261)?
             .status_words();
