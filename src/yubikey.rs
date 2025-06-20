@@ -364,7 +364,7 @@ impl YubiKey {
             .transmit(&txn, 261)?;
 
         let challenge_len = alg.challenge_len();
-        log::info!("challenge: {:02x?}", &challenge.data());
+        log::info!("challenge: {:?}", &challenge);
 
         if !challenge.is_success() || challenge.data().len() < challenge_len {
             return Err(Error::AuthenticationError);
