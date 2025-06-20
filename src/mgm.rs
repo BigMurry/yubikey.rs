@@ -668,3 +668,20 @@ fn is_weak_key(key: &[u8; DES_LEN_3DES]) -> bool {
 
     is_weak
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_encrypt() {
+        let mgm_key = MgmKey::default_aes();
+        let mut data = [0u8; AES_BLOCK_SIZE];
+        OsRng.fill_bytes(&mut data);
+
+        let enc = mgm_key.encrypt(&data).expect("enc fail");
+        let re_dec = mgm_key.decrypt(&enc).expect("dec fail");
+
+        assert_eq!(re_dec, data, "re-dec should equal original data");
+    }
+}

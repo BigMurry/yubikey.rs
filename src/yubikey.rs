@@ -71,6 +71,7 @@ pub(crate) const KEY_CARDMGM: u8 = 0x9b;
 
 const TAG_DYN_AUTH: u8 = 0x7c;
 const TAG_AUTH_WITNESS: u8 = 0x80;
+const TAG_AUTH_CHALLENGE: u8 = 0x81;
 
 /// Cached YubiKey PIN.
 pub type CachedPin = secrecy::SecretVec<u8>;
@@ -389,16 +390,17 @@ impl YubiKey {
         let mut data = vec![0u8; 6 + challenge_len * 2];
         data[0] = TAG_DYN_AUTH;
         data[1] = 4 + challenge_len as u8 * 2;
-        data[2] = 0x80; // TAG_AUTH_WITNESS
+        data[2] = TAG_AUTH_WITNESS; // TAG_AUTH_WITNESS
         data[3] = challenge_len as u8;
         data[4..4 + challenge_len].copy_from_slice(&response);
-        data[4 + challenge_len] = 0x81; // TAG_AUTH_CHALLENGE
+        data[4 + challenge_len] = TAG_AUTH_CHALLENGE; // TAG_AUTH_CHALLENGE
         data[5 + challenge_len] = challenge_len as u8;
         OsRng.fill_bytes(&mut data[6 + challenge_len..6 + challenge_len * 2]);
 
         let mut challenge = vec![0u8; challenge_len];
         challenge.copy_from_slice(&data[6 + challenge_len..6 + challenge_len * 2]);
         info!("my challenge: {:02x?}", &challenge);
+        info!("my full data: {:02x?}", &data);
 
         let authentication = Apdu::new(Ins::Authenticate)
             .params(alg.ty_code(), KEY_CARDMGM)
@@ -412,10 +414,12 @@ impl YubiKey {
 
         // compare the response from the card with our challenge
         let response = mgm_key.encrypt(&challenge)?;
+        let re_dec = mgm_key.decrypt(&authentication.data()[4..])?;
         info!("my enc2: {:02x?}", &response);
+        info!("re_dec: {:02x?}", &re_dec);
 
         use subtle::ConstantTimeEq;
-        if response.ct_eq(&authentication.data()[4..12]).unwrap_u8() != 1 {
+        if response.ct_eq(&authentication.data()[4..]).unwrap_u8() != 1 {
             return Err(Error::AuthenticationError);
         }
 
