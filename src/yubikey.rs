@@ -55,7 +55,7 @@ use {
         apdu::StatusWords,
         consts::{TAG_ADMIN_FLAGS_1, TAG_ADMIN_TIMESTAMP},
         metadata::AdminData,
-        mgm::{self, MgmAlgorithmId},
+        mgm,
         transaction::ChangeRefAction,
         Buffer, ObjectId,
     },
