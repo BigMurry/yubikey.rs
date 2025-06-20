@@ -362,7 +362,7 @@ impl YubiKey {
         let alg = mgm_key.algo();
 
         log::info!(
-            "cur alg: {:?}, new alg: {:?}, alg tag = {}",
+            "request challenge > cur alg: {:?}, new alg: {:?}, alg tag = {}",
             cur_alg,
             &alg,
             alg.ty_code()
@@ -374,7 +374,7 @@ impl YubiKey {
             .transmit(&txn, 261)?;
 
         let challenge_len = alg.challenge_len();
-        log::info!("challenge: {:?}", &challenge);
+        log::info!("yubi challenge: {:?}", &challenge);
 
         if !challenge.is_success() || challenge.data().len() < challenge_len {
             return Err(Error::AuthenticationError);
@@ -382,7 +382,9 @@ impl YubiKey {
 
         // send a response to the cards challenge and a challenge of our own.
         let response = mgm_key.decrypt(&challenge.data()[4..challenge_len + 4])?;
-        log::info!("response: {:02x?}", &response);
+        log::info!("my answer dec: {:02x?}", &response);
+        let enc_response = mgm_key.encrypt(&challenge.data()[4..challenge_len + 4])?;
+        log::info!("my answer enc: {:02x?}", &enc_response);
 
         let mut data = vec![0u8; 6 + challenge_len * 2];
         data[0] = TAG_DYN_AUTH;
@@ -396,19 +398,21 @@ impl YubiKey {
 
         let mut challenge = vec![0u8; challenge_len];
         challenge.copy_from_slice(&data[6 + challenge_len..6 + challenge_len * 2]);
+        info!("my challenge: {:02x?}", &challenge);
 
         let authentication = Apdu::new(Ins::Authenticate)
             .params(alg.ty_code(), KEY_CARDMGM)
             .data(data)
             .transmit(&txn, 261)?;
 
-        log::info!("auth: {:02x?}", &authentication.data());
+        log::info!("yubi answer: {:?}", &authentication);
         if !authentication.is_success() {
             return Err(Error::AuthenticationError);
         }
 
         // compare the response from the card with our challenge
         let response = mgm_key.encrypt(&challenge)?;
+        info!("my enc2: {:02x?}", &response);
 
         use subtle::ConstantTimeEq;
         if response.ct_eq(&authentication.data()[4..12]).unwrap_u8() != 1 {
