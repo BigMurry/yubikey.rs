@@ -82,6 +82,13 @@ impl Apdu {
         self
     }
 
+    /// Set this APDU's second parameter only
+    #[cfg(feature = "untested")]
+    pub(crate) fn p2(&mut self, value: u8) -> &mut Self {
+        self.p2 = value;
+        self
+    }
+
     /// Set both parameters for this APDU
     pub fn params(&mut self, p1: u8, p2: u8) -> &mut Self {
         self.p1 = p1;

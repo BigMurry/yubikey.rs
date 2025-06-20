@@ -41,12 +41,21 @@ use crate::{
     metadata::{AdminData, ProtectedData},
     yubikey::YubiKey,
 };
+use aes::cipher::{BlockDecrypt as AesDec, BlockEncrypt as AesEnc, KeyInit as AesKeyInit};
+use aes::{Aes128, Aes192, Aes256};
 use des::{
-    cipher::{generic_array::GenericArray, BlockDecrypt, BlockEncrypt, KeyInit},
+    cipher::{generic_array::GenericArray /*, BlockDecrypt, BlockEncrypt, KeyInit*/},
     TdesEde3,
 };
 #[cfg(feature = "untested")]
-use {pbkdf2::pbkdf2_hmac, sha1::Sha1};
+use {
+    crate::{
+        piv::{ManagementSlotId, SlotAlgorithmId},
+        transaction::Transaction,
+    },
+    pbkdf2::pbkdf2_hmac,
+    sha1::Sha1,
+};
 
 /// YubiKey MGMT Applet Name
 #[cfg(feature = "untested")]
@@ -59,6 +68,10 @@ pub(crate) const APPLET_NAME: &str = "YubiKey MGMT";
 pub(crate) const APPLET_ID: &[u8] = &[0xa0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17];
 
 pub(crate) const ADMIN_FLAGS_1_PROTECTED_MGM: u8 = 0x02;
+const AES_LEN_128: usize = 16;
+const AES_LEN_192: usize = 24;
+const AES_LEN_256: usize = 32;
+const AES_BLOCK_SIZE: usize = 16;
 
 #[cfg(feature = "untested")]
 const CB_ADMIN_SALT: usize = 16;
@@ -86,50 +99,208 @@ pub enum MgmType {
     Protected = 2,
 }
 
+/// Management key algorithm identifiers
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MgmAlgorithmId {
+    /// Triple DES (3DES) in EDE mode
+    ThreeDes,
+
+    /// Aes128
+    Aes128,
+
+    /// Aes192
+    Aes192,
+
+    /// Aes256
+    Aes256,
+}
+
+impl TryFrom<u8> for MgmAlgorithmId {
+    type Error = Error;
+
+    fn try_from(value: u8) -> Result<Self> {
+        match value {
+            0x03 => Ok(MgmAlgorithmId::ThreeDes),
+            0x08 => Ok(MgmAlgorithmId::Aes128),
+            0x0A => Ok(MgmAlgorithmId::Aes192),
+            0x0C => Ok(MgmAlgorithmId::Aes256),
+            _ => Err(Error::AlgorithmError),
+        }
+    }
+}
+
+impl From<MgmAlgorithmId> for u8 {
+    fn from(id: MgmAlgorithmId) -> u8 {
+        match id {
+            MgmAlgorithmId::ThreeDes => 0x03,
+            MgmAlgorithmId::Aes128 => 0x08,
+            MgmAlgorithmId::Aes192 => 0x0A,
+            MgmAlgorithmId::Aes256 => 0x0C,
+        }
+    }
+}
+
+impl MgmAlgorithmId {
+    /// Looks up the algorithm for the given Yubikey's current management key.
+    #[cfg(feature = "untested")]
+    pub(crate) fn query(txn: &Transaction<'_>) -> Result<Self> {
+        match txn.get_metadata(crate::piv::SlotId::Management(ManagementSlotId::Management)) {
+            Ok(metadata) => match metadata.algorithm {
+                SlotAlgorithmId::Management(alg) => Ok(alg),
+                // We specifically queried the management key slot; getting a known
+                // non-management algorithm back from the Yubikey is invalid.
+                _ => Err(Error::InvalidObject),
+            },
+            // Firmware versions without `GET METADATA` only support 3DES.
+            Err(Error::NotSupported) => Ok(MgmAlgorithmId::ThreeDes),
+            // `Error::AlgorithmError` only occurs when a new algorithm is encountered.
+            Err(Error::AlgorithmError) => Err(Error::NotSupported),
+            // Raise other errors as-is.
+            Err(e) => Err(e),
+        }
+    }
+
+    /// challenge length for different algo type
+    pub fn challenge_len(&self) -> usize {
+        match self {
+            MgmAlgorithmId::ThreeDes => DES_LEN_DES,
+            _ => AES_BLOCK_SIZE,
+        }
+    }
+
+    /// algo type code
+    pub fn ty_code(&self) -> u8 {
+        (*self).into()
+    }
+
+    /// key length
+    pub fn key_len(&self) -> usize {
+        match self {
+            MgmAlgorithmId::ThreeDes => DES_LEN_3DES,
+            MgmAlgorithmId::Aes128 => AES_LEN_128,
+            MgmAlgorithmId::Aes192 => AES_LEN_192,
+            MgmAlgorithmId::Aes256 => AES_LEN_256,
+        }
+    }
+}
+
 /// Management Key (MGM).
 ///
 /// This key is used to authenticate to the management applet running on
 /// a YubiKey in order to perform administrative functions.
 ///
-/// The only supported algorithm for MGM keys is 3DES.
+/// 3DES is deprecated, the default is AES192
+/// Authentication Management Key Type
 #[derive(Clone)]
-pub struct MgmKey([u8; DES_LEN_3DES]);
+pub enum MgmKey {
+    /// 3 DES key type, the deprecated one
+    TDES([u8; DES_LEN_3DES]),
+
+    /// AES128 type
+    AES128([u8; AES_LEN_128]),
+
+    /// AES192 type
+    AES192([u8; AES_LEN_192]),
+
+    /// AES256 type
+    AES256([u8; AES_LEN_256]),
+}
 
 impl MgmKey {
-    /// Generate a random MGM key
+    /// key algo tag
+    /// https://github.com/Yubico/yubikey-manager/blob/f3c37f690a2b184232ee88feb614bee6f5054526/yubikit/piv.py#L145
+    pub fn algo(&self) -> MgmAlgorithmId {
+        match self {
+            MgmKey::TDES(_) => MgmAlgorithmId::ThreeDes,
+            MgmKey::AES128(_) => MgmAlgorithmId::Aes128,
+            MgmKey::AES192(_) => MgmAlgorithmId::Aes192,
+            MgmKey::AES256(_) => MgmAlgorithmId::Aes256,
+        }
+    }
+
+    /// from firmware 5.7 and above, default key is aes192 type
+    pub fn default_aes() -> Self {
+        MgmKey::AES192([
+            1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8,
+        ])
+    }
+
+    /// Generate a random MGM key, type AES192
     pub fn generate() -> Self {
-        let mut key_bytes = [0u8; DES_LEN_3DES];
+        let mut key_bytes = [0u8; AES_LEN_192];
         OsRng.fill_bytes(&mut key_bytes);
-        Self(key_bytes)
+        Self::AES192(key_bytes)
     }
 
     /// Create an MGM key from byte slice.
     ///
     /// Returns an error if the slice is the wrong size or the key is weak.
+    #[deprecated(note = "should use `from_bytes_typed` instead")]
     pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<Self> {
-        bytes.as_ref().try_into()
+        Ok(Self::TDES(bytes.as_ref().try_into()?))
+    }
+
+    /// Create an MGM key from key slice and key algo
+    ///
+    /// Returns an error if key slice is the wrong size
+    pub fn from_bytes_typed(bytes: impl AsRef<[u8]>, algo: MgmAlgorithmId) -> Result<Self> {
+        match algo {
+            MgmAlgorithmId::ThreeDes => Ok(Self::TDES(bytes.as_ref().try_into()?)),
+            MgmAlgorithmId::Aes128 => Ok(Self::AES128(bytes.as_ref().try_into()?)),
+            MgmAlgorithmId::Aes192 => Ok(Self::AES192(bytes.as_ref().try_into()?)),
+            MgmAlgorithmId::Aes256 => Ok(Self::AES256(bytes.as_ref().try_into()?)),
+        }
     }
 
     /// Create an MGM key from the given byte array.
     ///
     /// Returns an error if the key is weak.
-    pub fn new(key_bytes: [u8; DES_LEN_3DES]) -> Result<Self> {
-        if is_weak_key(&key_bytes) {
-            error!(
-                "blacklisting key '{:?}' since it's weak (with odd parity)",
-                &key_bytes
-            );
+    pub fn new(key_bytes: Vec<u8>, algo: MgmAlgorithmId) -> Result<Self> {
+        match algo {
+            MgmAlgorithmId::ThreeDes => {
+                let key: [u8; DES_LEN_3DES] = key_bytes.try_into().map_err(|_| Error::SizeError)?;
+                if is_weak_key(&key) {
+                    error!(
+                        "blacklisting key '{:?}' since it's weak (with odd parity)",
+                        &key
+                    );
 
-            return Err(Error::KeyError);
+                    return Err(Error::KeyError);
+                }
+                Ok(Self::TDES(key))
+            }
+            MgmAlgorithmId::Aes128 => Ok(Self::AES128(
+                key_bytes.try_into().map_err(|_| Error::SizeError)?,
+            )),
+            MgmAlgorithmId::Aes192 => Ok(Self::AES192(
+                key_bytes.try_into().map_err(|_| Error::SizeError)?,
+            )),
+            MgmAlgorithmId::Aes256 => Ok(Self::AES256(
+                key_bytes.try_into().map_err(|_| Error::SizeError)?,
+            )),
         }
+    }
 
-        Ok(Self(key_bytes))
+    /// create empty mgm key by algo
+    pub fn empty(algo: MgmAlgorithmId) -> Self {
+        match algo {
+            MgmAlgorithmId::ThreeDes => Self::TDES([0u8; DES_LEN_3DES]),
+            MgmAlgorithmId::Aes128 => Self::AES128([0u8; AES_LEN_128]),
+            MgmAlgorithmId::Aes192 => Self::AES192([0u8; AES_LEN_192]),
+            MgmAlgorithmId::Aes256 => Self::AES256([0u8; AES_LEN_256]),
+        }
     }
 
     /// Get derived management key (MGM)
     #[cfg(feature = "untested")]
     pub fn get_derived(yubikey: &mut YubiKey, pin: &[u8]) -> Result<Self> {
         let txn = yubikey.begin_transaction()?;
+
+        // Check the key algorithm.
+        let alg = MgmAlgorithmId::query(&txn)?;
+        // if alg != MgmAlgorithmId::ThreeDes {
+        //     return Err(Error::NotSupported);
+        // }
 
         // recover management key
         let admin_data = AdminData::read(&txn)?;
@@ -145,9 +316,12 @@ impl MgmKey {
             return Err(Error::GenericError);
         }
 
-        let mut mgm = [0u8; DES_LEN_3DES];
-        pbkdf2_hmac::<Sha1>(pin, salt, ITER_MGM_PBKDF2, &mut mgm);
-        MgmKey::from_bytes(mgm)
+        let mut mgm_key = MgmKey::empty(alg);
+
+        // let mut mgm = [0u8; DES_LEN_3DES];
+        pbkdf2_hmac::<Sha1>(pin, salt, ITER_MGM_PBKDF2, mgm_key.as_mut());
+        // MgmKey::from_bytes(mgm)
+        Ok(mgm_key)
     }
 
     /// Get protected management key (MGM)
@@ -155,27 +329,30 @@ impl MgmKey {
     pub fn get_protected(yubikey: &mut YubiKey) -> Result<Self> {
         let txn = yubikey.begin_transaction()?;
 
-        let protected_data = ProtectedData::read(&txn).map_err(|e| {
-            error!("could not read protected data (err: {:?})", e);
-            e
-        })?;
+        // Check the key algorithm.
+        let alg = MgmAlgorithmId::query(&txn)?;
+        // if alg != MgmAlgorithmId::ThreeDes {
+        //     return Err(Error::NotSupported);
+        // }
 
-        let item = protected_data.get_item(TAG_PROTECTED_MGM).map_err(|e| {
-            error!("could not read protected MGM from metadata (err: {:?})", e);
-            e
-        })?;
+        let protected_data = ProtectedData::read(&txn)
+            .inspect_err(|e| error!("could not read protected data (err: {:?})", e))?;
 
-        if item.len() != DES_LEN_3DES {
-            error!(
-                "protected data contains MGM, but is the wrong size: {} (expected {})",
-                item.len(),
-                DES_LEN_3DES
-            );
+        let item = protected_data
+            .get_item(TAG_PROTECTED_MGM)
+            .inspect_err(|e| error!("could not read protected MGM from metadata (err: {:?})", e))?;
 
-            return Err(Error::AuthenticationError);
-        }
+        // if item.len() != DES_LEN_3DES {
+        //     error!(
+        //         "protected data contains MGM, but is the wrong size: {} (expected {})",
+        //         item.len(),
+        //         DES_LEN_3DES
+        //     );
 
-        MgmKey::from_bytes(item)
+        //     return Err(Error::AuthenticationError);
+        // }
+
+        MgmKey::from_bytes_typed(item, alg)
     }
 
     /// Resets the management key for the given YubiKey to the default value.
@@ -196,12 +373,10 @@ impl MgmKey {
     pub fn set_manual(&self, yubikey: &mut YubiKey, require_touch: bool) -> Result<()> {
         let txn = yubikey.begin_transaction()?;
 
-        txn.set_mgm_key(self, require_touch).map_err(|e| {
+        txn.set_mgm_key(self, require_touch)
             // Log a warning, since the device mgm key is corrupt or we're in a state
             // where we can't set the mgm key.
-            error!("could not set new derived mgm key, err = {}", e);
-            e
-        })?;
+            .inspect_err(|e| error!("could not set new derived mgm key, err = {}", e))?;
 
         // After this point, we've set the mgm key, so the function should succeed,
         // regardless of being able to set the metadata.
@@ -255,12 +430,10 @@ impl MgmKey {
     pub fn set_protected(&self, yubikey: &mut YubiKey) -> Result<()> {
         let txn = yubikey.begin_transaction()?;
 
-        txn.set_mgm_key(self, false).map_err(|e| {
+        txn.set_mgm_key(self, false)
             // log a warning, since the device mgm key is corrupt or we're in
             // a state where we can't set the mgm key
-            error!("could not set new derived mgm key, err = {}", e);
-            e
-        })?;
+            .inspect_err(|e| error!("could not set new derived mgm key, err = {}", e))?;
 
         // after this point, we've set the mgm key, so the function should
         // succeed, regardless of being able to set the metadata
@@ -272,10 +445,9 @@ impl MgmKey {
         if let Err(e) = protected_data.set_item(TAG_PROTECTED_MGM, self.as_ref()) {
             error!("could not set protected mgm item, err = {:?}", e);
         } else {
-            protected_data.write(&txn).map_err(|e| {
-                error!("could not write protected data, err = {:?}", e);
-                e
-            })?;
+            protected_data
+                .write(&txn)
+                .inspect_err(|e| error!("could not write protected data, err = {:?}", e))?;
         }
 
         // set the protected mgm flag in admin data
@@ -319,33 +491,109 @@ impl MgmKey {
         Ok(())
     }
 
-    /// Encrypt with 3DES key
-    pub(crate) fn encrypt(&self, input: &[u8; DES_LEN_DES]) -> [u8; DES_LEN_DES] {
-        let mut output = input.to_owned();
-        TdesEde3::new(GenericArray::from_slice(&self.0))
-            .encrypt_block(GenericArray::from_mut_slice(&mut output));
-        output
+    /// Encrypt with mgm key
+    pub(crate) fn encrypt(&self, input: &[u8]) -> Result<Vec<u8>> {
+        match self {
+            Self::TDES(k) => {
+                let output: [u8; DES_LEN_DES] = input.try_into().map_err(|_| Error::SizeError)?;
+                TdesEde3::new(k.into()).encrypt_block(&mut output.into());
+                Ok(output.to_vec())
+            }
+            Self::AES128(k) => {
+                let output: [u8; AES_BLOCK_SIZE] =
+                    input.try_into().map_err(|_| Error::SizeError)?;
+                let mut output = GenericArray::from(output);
+                let key = GenericArray::from(k.to_owned());
+                let cipher = Aes128::new(&key);
+                cipher.encrypt_block(&mut output);
+                Ok(output.to_vec())
+            }
+            Self::AES192(k) => {
+                let output: [u8; AES_BLOCK_SIZE] =
+                    input.try_into().map_err(|_| Error::SizeError)?;
+                let mut output = GenericArray::from(output);
+                let key = GenericArray::from(k.to_owned());
+                let cipher = Aes192::new(&key);
+                cipher.encrypt_block(&mut output);
+                Ok(output.to_vec())
+            }
+            Self::AES256(k) => {
+                let output: [u8; AES_BLOCK_SIZE] =
+                    input.try_into().map_err(|_| Error::SizeError)?;
+                let mut output = GenericArray::from(output);
+                let key = GenericArray::from(k.to_owned());
+                let cipher = Aes256::new(&key);
+                cipher.encrypt_block(&mut output);
+                Ok(output.to_vec())
+            }
+        }
     }
 
-    /// Decrypt with 3DES key
-    pub(crate) fn decrypt(&self, input: &[u8; DES_LEN_DES]) -> [u8; DES_LEN_DES] {
-        let mut output = input.to_owned();
-        TdesEde3::new(GenericArray::from_slice(&self.0))
-            .decrypt_block(GenericArray::from_mut_slice(&mut output));
-        output
+    /// Decrypt with mgm key
+    pub(crate) fn decrypt(&self, input: &[u8]) -> Result<Vec<u8>> {
+        match self {
+            Self::TDES(k) => {
+                let output: [u8; DES_LEN_DES] = input.try_into().map_err(|_| Error::SizeError)?;
+                TdesEde3::new(k.into()).decrypt_block(&mut output.into());
+                Ok(output.to_vec())
+            }
+            Self::AES128(k) => {
+                let output: [u8; AES_BLOCK_SIZE] =
+                    input.try_into().map_err(|_| Error::SizeError)?;
+                let mut output = GenericArray::from(output);
+                let key = GenericArray::from(k.to_owned());
+                let cipher = Aes128::new(&key);
+                cipher.decrypt_block(&mut output);
+                Ok(output.to_vec())
+            }
+            Self::AES192(k) => {
+                let output: [u8; AES_BLOCK_SIZE] =
+                    input.try_into().map_err(|_| Error::SizeError)?;
+                let mut output = GenericArray::from(output);
+                let key = GenericArray::from(k.to_owned());
+                let cipher = Aes192::new(&key);
+                cipher.decrypt_block(&mut output);
+                Ok(output.to_vec())
+            }
+            Self::AES256(k) => {
+                let output: [u8; AES_BLOCK_SIZE] =
+                    input.try_into().map_err(|_| Error::SizeError)?;
+                let mut output = GenericArray::from(output);
+                let key = GenericArray::from(k.to_owned());
+                let cipher = Aes256::new(&key);
+                cipher.decrypt_block(&mut output);
+                Ok(output.to_vec())
+            }
+        }
     }
 }
 
-impl AsRef<[u8; DES_LEN_3DES]> for MgmKey {
-    fn as_ref(&self) -> &[u8; DES_LEN_3DES] {
-        &self.0
+impl AsRef<[u8]> for MgmKey {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            MgmKey::TDES(k) => k.as_slice(),
+            MgmKey::AES128(k) => k.as_slice(),
+            MgmKey::AES192(k) => k.as_slice(),
+            MgmKey::AES256(k) => k.as_slice(),
+        }
+    }
+}
+
+impl AsMut<[u8]> for MgmKey {
+    fn as_mut(&mut self) -> &mut [u8] {
+        match self {
+            MgmKey::TDES(k) => k.as_mut(),
+            MgmKey::AES128(k) => k.as_mut(),
+            MgmKey::AES192(k) => k.as_mut(),
+            MgmKey::AES256(k) => k.as_mut(),
+        }
     }
 }
 
 /// Default MGM key configured on all YubiKeys
 impl Default for MgmKey {
     fn default() -> Self {
-        MgmKey([
+        MgmKey::TDES([
             1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8,
         ])
     }
@@ -353,15 +601,12 @@ impl Default for MgmKey {
 
 impl Drop for MgmKey {
     fn drop(&mut self) {
-        self.0.zeroize();
-    }
-}
-
-impl<'a> TryFrom<&'a [u8]> for MgmKey {
-    type Error = Error;
-
-    fn try_from(key_bytes: &'a [u8]) -> Result<Self> {
-        Self::new(key_bytes.try_into().map_err(|_| Error::SizeError)?)
+        match self {
+            MgmKey::TDES(k) => k.zeroize(),
+            MgmKey::AES128(k) => k.zeroize(),
+            MgmKey::AES192(k) => k.zeroize(),
+            MgmKey::AES256(k) => k.zeroize(),
+        }
     }
 }
 
