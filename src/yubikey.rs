@@ -365,11 +365,11 @@ impl YubiKey {
             "cur alg: {:?}, new alg: {:?}, alg tag = {}",
             cur_alg,
             &alg,
-            alg as u8
+            alg.ty_code()
         );
         // get a challenge from the card
         let challenge = Apdu::new(Ins::Authenticate)
-            .params(alg as u8, KEY_CARDMGM)
+            .params(alg.ty_code(), KEY_CARDMGM)
             .data([TAG_DYN_AUTH, 0x02, TAG_AUTH_WITNESS, 0x00])
             .transmit(&txn, 261)?;
 
@@ -398,7 +398,7 @@ impl YubiKey {
         challenge.copy_from_slice(&data[6 + challenge_len..6 + challenge_len * 2]);
 
         let authentication = Apdu::new(Ins::Authenticate)
-            .params(alg as u8, KEY_CARDMGM)
+            .params(alg.ty_code(), KEY_CARDMGM)
             .data(data)
             .transmit(&txn, 261)?;
 
