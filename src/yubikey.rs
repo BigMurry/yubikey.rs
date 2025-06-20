@@ -36,7 +36,7 @@ use crate::{
     chuid::ChuId,
     config::Config,
     error::{Error, Result},
-    mgm::MgmKey,
+    mgm::{MgmAlgorithmId, MgmKey},
     piv,
     reader::{Context, Reader},
     transaction::Transaction,
@@ -356,7 +356,10 @@ impl YubiKey {
     /// Authenticate to the card using the provided management key (MGM).
     pub fn authenticate(&mut self, mgm_key: MgmKey) -> Result<()> {
         let txn = self.begin_transaction()?;
+        let cur_alg = MgmAlgorithmId::query(&txn)?;
         let alg = mgm_key.algo();
+
+        log::info!("cur alg: {:?}, new alg: {:?}", cur_alg, &alg);
         // get a challenge from the card
         let challenge = Apdu::new(Ins::Authenticate)
             .params(alg as u8, KEY_CARDMGM)

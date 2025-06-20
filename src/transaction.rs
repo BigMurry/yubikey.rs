@@ -200,7 +200,6 @@ impl<'tx> Transaction<'tx> {
     }
 
     /// Read metadata
-    #[cfg(feature = "untested")]
     pub(crate) fn get_metadata(&self, slot: SlotId) -> Result<piv::SlotMetadata> {
         let response = Apdu::new(Ins::GetMetadata)
             .p2(slot.into())

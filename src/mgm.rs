@@ -41,6 +41,10 @@ use crate::{
     metadata::{AdminData, ProtectedData},
     yubikey::YubiKey,
 };
+use crate::{
+    piv::{ManagementSlotId, SlotAlgorithmId},
+    transaction::Transaction,
+};
 use aes::cipher::{BlockDecrypt as AesDec, BlockEncrypt as AesEnc, KeyInit as AesKeyInit};
 use aes::{Aes128, Aes192, Aes256};
 use des::{
@@ -48,14 +52,7 @@ use des::{
     TdesEde3,
 };
 #[cfg(feature = "untested")]
-use {
-    crate::{
-        piv::{ManagementSlotId, SlotAlgorithmId},
-        transaction::Transaction,
-    },
-    pbkdf2::pbkdf2_hmac,
-    sha1::Sha1,
-};
+use {pbkdf2::pbkdf2_hmac, sha1::Sha1};
 
 /// YubiKey MGMT Applet Name
 #[cfg(feature = "untested")]
@@ -142,7 +139,6 @@ impl From<MgmAlgorithmId> for u8 {
 
 impl MgmAlgorithmId {
     /// Looks up the algorithm for the given Yubikey's current management key.
-    #[cfg(feature = "untested")]
     pub(crate) fn query(txn: &Transaction<'_>) -> Result<Self> {
         match txn.get_metadata(crate::piv::SlotId::Management(ManagementSlotId::Management)) {
             Ok(metadata) => match metadata.algorithm {
