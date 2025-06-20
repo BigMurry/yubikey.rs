@@ -70,6 +70,7 @@ pub(crate) const ADMIN_FLAGS_1_PUK_BLOCKED: u8 = 0x01;
 pub(crate) const KEY_CARDMGM: u8 = 0x9b;
 
 const TAG_DYN_AUTH: u8 = 0x7c;
+const TAG_AUTH_WITNESS: u8 = 0x80;
 
 /// Cached YubiKey PIN.
 pub type CachedPin = secrecy::SecretVec<u8>;
@@ -354,16 +355,22 @@ impl YubiKey {
     }
 
     /// Authenticate to the card using the provided management key (MGM).
+    /// https://github.com/Yubico/Yubico.NET.SDK/blob/3552293962d2ff258c45631eb9f63ec524359112/docs/users-manual/application-piv/apdu/auth-mgmt.md
     pub fn authenticate(&mut self, mgm_key: MgmKey) -> Result<()> {
         let txn = self.begin_transaction()?;
         let cur_alg = MgmAlgorithmId::query(&txn)?;
         let alg = mgm_key.algo();
 
-        log::info!("cur alg: {:?}, new alg: {:?}", cur_alg, &alg);
+        log::info!(
+            "cur alg: {:?}, new alg: {:?}, alg tag = {}",
+            cur_alg,
+            &alg,
+            alg as u8
+        );
         // get a challenge from the card
         let challenge = Apdu::new(Ins::Authenticate)
             .params(alg as u8, KEY_CARDMGM)
-            .data([TAG_DYN_AUTH, 0x02, 0x80, 0x00])
+            .data([TAG_DYN_AUTH, 0x02, TAG_AUTH_WITNESS, 0x00])
             .transmit(&txn, 261)?;
 
         let challenge_len = alg.challenge_len();
