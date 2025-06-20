@@ -364,6 +364,7 @@ impl YubiKey {
             .transmit(&txn, 261)?;
 
         let challenge_len = alg.challenge_len();
+        log::info!("challenge: {:02x?}", &challenge.data());
 
         if !challenge.is_success() || challenge.data().len() < challenge_len {
             return Err(Error::AuthenticationError);
@@ -371,6 +372,7 @@ impl YubiKey {
 
         // send a response to the cards challenge and a challenge of our own.
         let response = mgm_key.decrypt(&challenge.data()[4..challenge_len + 4])?;
+        log::info!("response: {:02x?}", &response);
 
         let mut data = vec![0u8; 6 + challenge_len * 2];
         data[0] = TAG_DYN_AUTH;
@@ -390,6 +392,7 @@ impl YubiKey {
             .data(data)
             .transmit(&txn, 261)?;
 
+        log::info!("auth: {:02x?}", &authentication.data());
         if !authentication.is_success() {
             return Err(Error::AuthenticationError);
         }
