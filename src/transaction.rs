@@ -268,7 +268,7 @@ impl<'tx> Transaction<'tx> {
         let alg = new_key.algo();
         let key_len = alg.key_len();
         let mut data = vec![0u8; 3 + key_len];
-        data[0] = alg as u8;
+        data[0] = alg.into();
         data[1] = KEY_CARDMGM;
         data[2] = alg.key_len() as u8;
         data[3..3 + alg.key_len()].copy_from_slice(new_key.as_ref());
