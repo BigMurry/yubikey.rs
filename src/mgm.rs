@@ -491,8 +491,9 @@ impl MgmKey {
     pub(crate) fn encrypt(&self, input: &[u8]) -> Result<Vec<u8>> {
         match self {
             Self::TDES(k) => {
-                let output: [u8; DES_LEN_DES] = input.try_into().map_err(|_| Error::SizeError)?;
-                TdesEde3::new(k.into()).encrypt_block(&mut output.into());
+                let mut output: [u8; DES_LEN_DES] =
+                    input.try_into().map_err(|_| Error::SizeError)?;
+                TdesEde3::new(k.into()).encrypt_block((&mut output).into());
                 Ok(output.to_vec())
             }
             Self::AES128(k) => {
@@ -529,8 +530,9 @@ impl MgmKey {
     pub(crate) fn decrypt(&self, input: &[u8]) -> Result<Vec<u8>> {
         match self {
             Self::TDES(k) => {
-                let output: [u8; DES_LEN_DES] = input.try_into().map_err(|_| Error::SizeError)?;
-                TdesEde3::new(k.into()).decrypt_block(&mut output.into());
+                let mut output: [u8; DES_LEN_DES] =
+                    input.try_into().map_err(|_| Error::SizeError)?;
+                TdesEde3::new(k.into()).decrypt_block((&mut output).into());
                 Ok(output.to_vec())
             }
             Self::AES128(k) => {
